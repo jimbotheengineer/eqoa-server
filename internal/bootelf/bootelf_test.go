@@ -7,6 +7,15 @@ import (
 	"testing"
 )
 
+// crc is PCSX2's ElfObject::GetCRC: XOR of every whole 32-bit word.
+func crc(b []byte) uint32 {
+	var v uint32
+	for i := 0; i+4 <= len(b); i += 4 {
+		v ^= binary.LittleEndian.Uint32(b[i:])
+	}
+	return v
+}
+
 // A minimal stand-in for the loader: some filler, one patch table holding the
 // lui/ori pair, and a trailing CRC word. Built rather than read from disk so the
 // tests run in a checkout that has no PS2 toolchain and no eqoa-boot/out.
@@ -91,6 +100,13 @@ func TestRefusesWhatItCannotUnderstand(t *testing.T) {
 	}
 	if _, err := Retarget(good, "2001:db8::1"); err == nil {
 		t.Error("accepted IPv6, which has nowhere to go in a 32-bit constant")
+	}
+	s, err := find(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Retarget(good[:s.loOff+4], "10.0.0.1"); err == nil {
+		t.Error("accepted an address instruction as the CRC word")
 	}
 	if _, err := Retarget(make([]byte, 64), "10.0.0.1"); err == nil {
 		t.Error("accepted a file with no address pair in it")

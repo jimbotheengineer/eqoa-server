@@ -113,15 +113,6 @@ func find(elf []byte) (site, error) {
 	}
 }
 
-// crc is PCSX2's ElfObject::GetCRC: XOR of every whole 32-bit word.
-func crc(b []byte) uint32 {
-	var v uint32
-	for i := 0; i+4 <= len(b); i += 4 {
-		v ^= binary.LittleEndian.Uint32(b[i:])
-	}
-	return v
-}
-
 // Address reports the login address a built loader currently aims at.
 func Address(elf []byte) (net.IP, error) {
 	s, err := find(elf)
@@ -148,38 +139,29 @@ func Retarget(elf []byte, ip string) ([]byte, error) {
 			"an IPv6 address", ip)
 	}
 
-	out := make([]byte, len(elf))
-	copy(out, elf)
-	s, err := find(out)
+	s, err := find(elf)
 	if err != nil {
 		return nil, err
 	}
-	// The CRC to keep is the one it came with. Reading it here rather than
-	// naming EEEE1FCC means a loader tuned to something else stays tuned to
-	// that, and there is no constant to fall out of step with eqoa-boot.
-	want := crc(out)
-
-	addr := uint32(v4[0])<<24 | uint32(v4[1])<<16 | uint32(v4[2])<<8 | uint32(v4[3])
-	binary.LittleEndian.PutUint32(out[s.hiOff:], opLUIv1|addr>>16)
-	binary.LittleEndian.PutUint32(out[s.loOff:], opORIv1|addr&0xFFFF)
-
-	// Restore the XOR with the trailing word crc_tune.py appended. It sits past
-	// every program header, so the PS2's own loader never reads it — only
-	// PCSX2's hash does.
-	if len(out) < 4 {
-		return nil, errors.New("loader is too short to carry a CRC word")
+	if len(elf)%4 != 0 {
+		return nil, fmt.Errorf("loader length %d is not a whole number of words", len(elf))
 	}
-	tail := len(out) - 4
-	if tail%4 != 0 {
-		return nil, fmt.Errorf("loader length %d is not a whole number of "+
-			"words, so it carries no tunable CRC word", len(out))
+	tail := len(elf) - 4
+	if tail <= s.loOff {
+		return nil, errors.New("loader has no separate trailing CRC word")
 	}
-	binary.LittleEndian.PutUint32(out[tail:],
-		binary.LittleEndian.Uint32(out[tail:])^crc(out)^want)
 
-	if got := crc(out); got != want {
-		return nil, fmt.Errorf("retarget left the CRC at %08X, wanted %08X", got, want)
-	}
+	// PCSX2 XORs every word. Only these two will change, so applying their
+	// XOR delta to the trailing word preserves the CRC of the input.
+	addr := binary.BigEndian.Uint32(v4)
+	hi, lo := opLUIv1|addr>>16, opORIv1|addr&0xFFFF
+	oldHi := binary.LittleEndian.Uint32(elf[s.hiOff:])
+	oldLo := binary.LittleEndian.Uint32(elf[s.loOff:])
+	tune := binary.LittleEndian.Uint32(elf[tail:]) ^ oldHi ^ hi ^ oldLo ^ lo
+	out := append([]byte(nil), elf...)
+	binary.LittleEndian.PutUint32(out[s.hiOff:], hi)
+	binary.LittleEndian.PutUint32(out[s.loOff:], lo)
+	binary.LittleEndian.PutUint32(out[tail:], tune)
 	return out, nil
 }
 
